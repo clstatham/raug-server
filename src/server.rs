@@ -33,11 +33,13 @@ impl Server {
                 GraphOp::Play => {
                     let running_graph = self.graph.play(CpalOut::default())?;
                     self.running_graph = Some(running_graph);
+                    responses.push(GraphOpResponse::None);
                 }
                 GraphOp::Stop => {
                     if let Some(running_graph) = self.running_graph.take() {
                         running_graph.stop()?;
                     }
+                    responses.push(GraphOpResponse::None);
                 }
                 op => {
                     responses.push(op.apply(&self.graph)?);

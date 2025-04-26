@@ -136,6 +136,10 @@ pub enum GraphOp {
         target: NodeIndex,
         target_input: NameOrIndex,
     },
+    ReplaceNode {
+        target: NodeIndex,
+        replacement: NodeIndex,
+    },
 }
 
 impl GraphOp {
@@ -177,6 +181,14 @@ impl GraphOp {
                 graph.connect(*source, source_output, *target, target_input);
                 Ok(GraphOpResponse::None)
             }
+            GraphOp::ReplaceNode {
+                target,
+                replacement,
+            } => {
+                let node =
+                    graph.with_inner(|graph| graph.replace_node_gracefully(*target, *replacement));
+                Ok(GraphOpResponse::NodeIndex(node))
+            }
         }
     }
 
@@ -213,6 +225,19 @@ impl GraphOp {
                         source_output,
                         target,
                         target_input,
+                    }])
+                }
+                "/replace_node" => {
+                    let [target, replacement] = &msg.args[..] else {
+                        unreachable!()
+                    };
+
+                    let target = NodeIndex::new(target.clone().int().unwrap() as usize);
+                    let replacement = NodeIndex::new(replacement.clone().int().unwrap() as usize);
+
+                    Ok(vec![GraphOp::ReplaceNode {
+                        target,
+                        replacement,
                     }])
                 }
                 e => Err(InvalidGraphOpError(e.to_string()).into()),
@@ -264,6 +289,17 @@ impl GraphOp {
                     args: vec![source, source_output, target, target_input],
                 })
             }
+            GraphOp::ReplaceNode {
+                target,
+                replacement,
+            } => {
+                let target = OscType::Int(target.index() as i32);
+                let replacement = OscType::Int(replacement.index() as i32);
+                OscPacket::Message(OscMessage {
+                    addr: "/replace_node".to_string(),
+                    args: vec![target, replacement],
+                })
+            }
         }
     }
 }
@@ -272,18 +308,17 @@ impl GraphOp {
 #[error("Unknown processor")]
 pub struct UnknownProcessorError;
 
-macro_rules! procs {
-    ($graph:ident, $name:ident => $($proc:ident),* $(,)?) => {
-        match $name {
-            $(
-                stringify!($proc) => $graph.node($proc::default()),
-            )*
-            _ => return Err(UnknownProcessorError.into()),
-        }
-    };
-}
-
 fn add_proc_by_name(graph: &Graph, name: &str) -> Result<NodeIndex> {
-    let node = procs!(graph, name => Add, Sub, Mul, Div, Neg, SineOscillator, BlSawOscillator);
+    macro_rules! procs {
+        ($($proc:ident),* $(,)?) => {
+            match name {
+                $(
+                    stringify!($proc) => graph.node($proc::default()),
+                )*
+                _ => return Err(UnknownProcessorError.into()),
+            }
+        };
+    }
+    let node = procs!(Add, Sub, Mul, Div, Neg, SineOscillator, BlSawOscillator);
     Ok(node.id())
 }
