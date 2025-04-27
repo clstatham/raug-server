@@ -11,6 +11,8 @@ use rosc::{OscMessage, OscPacket, OscType};
 use thiserror::Error;
 use tokio::net::{ToSocketAddrs, UdpSocket};
 
+use crate::server::Server;
+
 #[derive(Error, Debug)]
 #[error("Invalid name or index")]
 pub struct InvalidNameOrIndexError;
@@ -125,8 +127,14 @@ pub struct InvalidGraphOpError(String);
 pub enum GraphOp {
     Play,
     Stop,
-    AddDac,
     AddConstantF32(f32),
+    AddConstantBool(bool),
+    AddConstantString(String),
+    AddToMix {
+        mixer_channel: usize,
+        source: NodeIndex,
+        source_output: NameOrIndex,
+    },
     AddProcessor {
         name: String,
     },
@@ -137,7 +145,7 @@ pub enum GraphOp {
         target_input: NameOrIndex,
     },
     ReplaceNode {
-        target: NodeIndex,
+        replaced: NodeIndex,
         replacement: NodeIndex,
     },
 }
@@ -150,26 +158,51 @@ impl GraphOp {
     ) -> Result<GraphOpResponse> {
         let buf = rosc::encoder::encode(&self.to_osc())?;
         sock.send_to(&buf, addr).await?;
-        let mut buf = vec![0u8; rosc::decoder::MTU];
+        let mut buf = [0u8; rosc::decoder::MTU];
         let (size, _addr) = sock.recv_from(&mut buf).await?;
         let (_, packet) = rosc::decoder::decode_udp(&buf[..size])?;
         Ok(GraphOpResponse::try_from_osc(&packet)?.remove(0))
     }
 
-    pub fn apply(&self, graph: &Graph) -> Result<GraphOpResponse> {
+    pub fn apply(&self, server: &mut Server) -> Result<GraphOpResponse> {
+        let graph = server.graph().clone();
         match self {
-            GraphOp::Play => Ok(GraphOpResponse::None),
-            GraphOp::Stop => Ok(GraphOpResponse::None),
-            GraphOp::AddDac => {
-                let node = graph.with_inner(|graph| graph.add_audio_output());
-                Ok(GraphOpResponse::NodeIndex(node))
+            GraphOp::Play => {
+                server.start_graph()?;
+                Ok(GraphOpResponse::None)
+            }
+            GraphOp::Stop => {
+                server.stop_graph()?;
+                Ok(GraphOpResponse::None)
+            }
+            GraphOp::AddToMix {
+                mixer_channel,
+                source,
+                source_output,
+            } => {
+                let channel = server.mixer_channel(*mixer_channel).node();
+                let NameOrIndex::Index(source_output) = source_output else {
+                    todo!()
+                };
+                graph.with_inner(|graph| {
+                    graph.connect(*source, *source_output, channel.id(), 0);
+                });
+                Ok(GraphOpResponse::None)
             }
             GraphOp::AddConstantF32(c) => {
                 let node = graph.node(Constant::new(*c));
                 Ok(GraphOpResponse::NodeIndex(node.id()))
             }
+            GraphOp::AddConstantBool(c) => {
+                let node = graph.node(Constant::new(*c));
+                Ok(GraphOpResponse::NodeIndex(node.id()))
+            }
+            GraphOp::AddConstantString(c) => {
+                let node = graph.node(Constant::new(Str::from(c.as_str())));
+                Ok(GraphOpResponse::NodeIndex(node.id()))
+            }
             GraphOp::AddProcessor { name } => {
-                let node = add_proc_by_name(graph, name)?;
+                let node = add_proc_by_name(&graph, name)?;
                 Ok(GraphOpResponse::NodeIndex(node))
             }
             GraphOp::Connect {
@@ -182,11 +215,11 @@ impl GraphOp {
                 Ok(GraphOpResponse::None)
             }
             GraphOp::ReplaceNode {
-                target,
+                replaced,
                 replacement,
             } => {
-                let node =
-                    graph.with_inner(|graph| graph.replace_node_gracefully(*target, *replacement));
+                let node = graph
+                    .with_inner(|graph| graph.replace_node_gracefully(*replaced, *replacement));
                 Ok(GraphOpResponse::NodeIndex(node))
             }
         }
@@ -197,11 +230,33 @@ impl GraphOp {
             OscPacket::Message(msg) => match msg.addr.as_str() {
                 "/play" => Ok(vec![GraphOp::Play]),
                 "/stop" => Ok(vec![GraphOp::Stop]),
-                "/add_dac" => Ok(vec![GraphOp::AddDac]),
+                "/add_to_mix" => {
+                    let [channel, index, output] = &msg.args[..] else {
+                        unreachable!()
+                    };
+                    let channel = channel.clone().int().unwrap();
+                    let index = index.clone().int().unwrap();
+                    let output = output.clone().int().unwrap();
+                    Ok(vec![GraphOp::AddToMix {
+                        mixer_channel: channel as usize,
+                        source: NodeIndex::new(index as usize),
+                        source_output: NameOrIndex::Index(output as u32),
+                    }])
+                }
                 "/add_constant_f32" => {
                     let [c] = &msg.args[..] else { unreachable!() };
                     let c = c.clone().float().unwrap();
                     Ok(vec![GraphOp::AddConstantF32(c)])
+                }
+                "/add_constant_bool" => {
+                    let [c] = &msg.args[..] else { unreachable!() };
+                    let c = c.clone().bool().unwrap();
+                    Ok(vec![GraphOp::AddConstantBool(c)])
+                }
+                "/add_constant_string" => {
+                    let [c] = &msg.args[..] else { unreachable!() };
+                    let c = c.clone().string().unwrap();
+                    Ok(vec![GraphOp::AddConstantString(c)])
                 }
                 "/add_processor" => {
                     let [name] = &msg.args[..] else {
@@ -228,15 +283,15 @@ impl GraphOp {
                     }])
                 }
                 "/replace_node" => {
-                    let [target, replacement] = &msg.args[..] else {
+                    let [replaced, replacement] = &msg.args[..] else {
                         unreachable!()
                     };
 
-                    let target = NodeIndex::new(target.clone().int().unwrap() as usize);
+                    let replaced = NodeIndex::new(replaced.clone().int().unwrap() as usize);
                     let replacement = NodeIndex::new(replacement.clone().int().unwrap() as usize);
 
                     Ok(vec![GraphOp::ReplaceNode {
-                        target,
+                        replaced,
                         replacement,
                     }])
                 }
@@ -262,13 +317,29 @@ impl GraphOp {
                 addr: "/stop".to_string(),
                 args: vec![],
             }),
-            GraphOp::AddDac => OscPacket::Message(OscMessage {
-                addr: "/add_dac".to_string(),
-                args: vec![],
+            GraphOp::AddToMix {
+                mixer_channel,
+                source,
+                source_output,
+            } => OscPacket::Message(OscMessage {
+                addr: "/add_to_mix".to_string(),
+                args: vec![
+                    OscType::Int(mixer_channel as i32),
+                    OscType::Int(source.index() as i32),
+                    source_output.into(),
+                ],
             }),
             GraphOp::AddConstantF32(c) => OscPacket::Message(OscMessage {
                 addr: "/add_constant_f32".to_string(),
                 args: vec![OscType::Float(c)],
+            }),
+            GraphOp::AddConstantBool(c) => OscPacket::Message(OscMessage {
+                addr: "/add_constant_bool".to_string(),
+                args: vec![OscType::Bool(c)],
+            }),
+            GraphOp::AddConstantString(c) => OscPacket::Message(OscMessage {
+                addr: "/add_constant_string".to_string(),
+                args: vec![OscType::String(c)],
             }),
             GraphOp::AddProcessor { name } => OscPacket::Message(OscMessage {
                 addr: "/add_processor".to_string(),
@@ -290,7 +361,7 @@ impl GraphOp {
                 })
             }
             GraphOp::ReplaceNode {
-                target,
+                replaced: target,
                 replacement,
             } => {
                 let target = OscType::Int(target.index() as i32);

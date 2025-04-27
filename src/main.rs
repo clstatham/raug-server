@@ -1,23 +1,37 @@
-use std::net::SocketAddr;
+use std::{net::SocketAddr, str::FromStr};
 
 use anyhow::Result;
 use clap::Parser;
+use raug::prelude::{AudioBackend, AudioDevice};
 use tokio::net::UdpSocket;
-
-pub mod server;
 
 #[derive(Parser)]
 struct Args {
     #[clap(short, long, default_value = "127.0.0.1:5050")]
     addr: SocketAddr,
+    #[clap(short, long, default_value = "0")]
+    inputs: usize,
+    #[clap(short, long, default_value = "2")]
+    outputs: usize,
+    #[clap(short, long, value_parser = AudioBackend::from_str, default_value = "default")]
+    backend: AudioBackend,
+    #[clap(short, long, value_parser = AudioDevice::from_str, default_value = "default")]
+    device: AudioDevice,
 }
 
-async fn server(host_addr: &SocketAddr) -> Result<()> {
-    let sock = UdpSocket::bind(host_addr).await?;
+async fn server(args: Args) -> Result<()> {
+    let Args {
+        addr,
+        inputs,
+        outputs,
+        backend,
+        device,
+    } = args;
+    let sock = UdpSocket::bind(addr).await?;
 
-    let mut server = server::Server::new();
+    let mut server = raug_server::server::Server::new(inputs, outputs, backend, device);
 
-    let mut buf = vec![0u8; rosc::decoder::MTU];
+    let mut buf = [0u8; rosc::decoder::MTU];
 
     'recv: loop {
         match sock.recv_from(&mut buf).await {
@@ -40,6 +54,7 @@ async fn server(host_addr: &SocketAddr) -> Result<()> {
             }
             Err(e) => {
                 log::error!("recv_from failed: {}", e);
+                return Err(e.into());
             }
         }
     }
@@ -49,6 +64,6 @@ async fn server(host_addr: &SocketAddr) -> Result<()> {
 async fn main() -> Result<()> {
     env_logger::init();
     let args = Args::parse();
-    server(&args.addr).await?;
+    server(args).await?;
     Ok(())
 }
