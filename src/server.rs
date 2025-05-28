@@ -43,7 +43,7 @@ impl Server {
         self.mixer.len()
     }
 
-    pub fn mixer_channel(&mut self, index: usize) -> &Input {
+    pub fn mixer_channel(&mut self, index: usize) -> Input {
         if index < self.num_mixer_channels() {
             self.mixer[index].input(0)
         } else {

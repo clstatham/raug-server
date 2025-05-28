@@ -1,12 +1,7 @@
 use anyhow::Result;
-use raug::{
-    graph::{
-        Graph, NodeIndex,
-        node::{IntoInputIdx, IntoOutputIdx},
-    },
-    prelude::{Node, *},
-};
+use raug::{graph::Graph, prelude::*};
 use raug_ext::prelude::{BlSawOscillator, SineOscillator};
+use raug_graph::{builder::IntoIndex, graph::NodeIndex};
 use rosc::{OscMessage, OscPacket, OscType};
 use thiserror::Error;
 use tokio::net::{ToSocketAddrs, UdpSocket};
@@ -45,20 +40,24 @@ impl Into<OscType> for NameOrIndex {
     }
 }
 
-impl IntoOutputIdx for &NameOrIndex {
-    fn into_output_idx(self, node: &Node) -> u32 {
+impl IntoIndex for &NameOrIndex {
+    fn into_input_idx<G: raug_graph::prelude::AbstractGraph>(
+        self,
+        node: &raug_graph::prelude::NodeBuilder<G>,
+    ) -> Option<u32> {
         match self {
-            NameOrIndex::Name(name) => node.output(name.as_str()).index(),
-            NameOrIndex::Index(index) => node.output(*index).index(),
+            NameOrIndex::Name(name) => node.input(name.as_str()).map(|i| i.index()).ok(),
+            NameOrIndex::Index(index) => Some(*index),
         }
     }
-}
 
-impl IntoInputIdx for &NameOrIndex {
-    fn into_input_idx(self, node: &Node) -> u32 {
+    fn into_output_idx<G: raug_graph::prelude::AbstractGraph>(
+        self,
+        node: &raug_graph::prelude::NodeBuilder<G>,
+    ) -> Option<u32> {
         match self {
-            NameOrIndex::Name(name) => node.input(name.as_str()).index(),
-            NameOrIndex::Index(index) => node.input(*index).index(),
+            NameOrIndex::Name(name) => node.output(name.as_str()).map(|i| i.index()).ok(),
+            NameOrIndex::Index(index) => Some(*index),
         }
     }
 }
