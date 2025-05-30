@@ -210,7 +210,7 @@ impl GraphOp {
                 target,
                 target_input,
             } => {
-                graph.connect(*source, source_output, *target, target_input);
+                graph.connect(*source, source_output, *target, target_input)?;
                 Ok(GraphOpResponse::None)
             }
             GraphOp::ReplaceNode {
